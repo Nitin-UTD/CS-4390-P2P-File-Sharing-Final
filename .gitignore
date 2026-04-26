@@ -1,0 +1,10 @@
+*.o
+tracker
+peer
+tracker.log
+peer*/logs/*.log
+peer*/cache/*.track
+peer*/cache/*.parts
+torrents/*.track
+peer*/shared/*
+peer*/downloads/*
