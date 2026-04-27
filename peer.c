@@ -271,11 +271,13 @@ static int get_tracker_file(const PeerConfig *cfg, const char *track_name, Track
     return 0;
 }
 
-static int choose_source(const TrackerInfo *tracker, long start, long end, PeerEntry *out) {
+static int choose_source_skip(const TrackerInfo *tracker, long start, long end,
+                              const char *skip_ip, int skip_port, PeerEntry *out) {
     int i, found = 0;
     long best_ts = -1;
     for (i = 0; i < tracker->peer_count; i++) {
         const PeerEntry *p = &tracker->peers[i];
+        if (skip_ip && strcmp(p->ip, skip_ip) == 0 && p->port == skip_port) continue;
         if (p->start <= start && p->end >= end && p->timestamp > best_ts) {
             *out = *p;
             best_ts = p->timestamp;
@@ -283,6 +285,10 @@ static int choose_source(const TrackerInfo *tracker, long start, long end, PeerE
         }
     }
     return found ? 0 : -1;
+}
+
+static int choose_source(const TrackerInfo *tracker, long start, long end, PeerEntry *out) {
+    return choose_source_skip(tracker, start, end, NULL, 0, out);
 }
 
 static void part_file_path(const PeerConfig *cfg, const char *filename, char *out, size_t outsz) {
@@ -369,8 +375,28 @@ static void *download_worker(void *arg) {
         unsigned char *data = NULL;
         size_t len = 0;
         FILE *fp;
+        int attempt, got_chunk = 0;
+        PeerEntry source = task->source;
         if (chunk_end > task->end) chunk_end = task->end;
-        if (request_chunk(task->cfg, &task->source, task->tracker->filename, pos, chunk_end, &data, &len) != 0) {
+        for (attempt = 0; attempt < 60; attempt++) {
+            PeerEntry failed_source = source;
+            TrackerInfo fresh;
+            char track_name[300];
+            if (request_chunk(task->cfg, &source, task->tracker->filename, pos, chunk_end, &data, &len) == 0) {
+                got_chunk = 1;
+                break;
+            }
+            snprintf(track_name, sizeof(track_name), "%s.track", task->tracker->filename);
+            sleep(2);
+            if (get_tracker_file(task->cfg, track_name, &fresh) == 0 &&
+                choose_source_skip(&fresh, pos, chunk_end, failed_source.ip, failed_source.port, &source) == 0) {
+                continue;
+            }
+            if (choose_source_skip(task->tracker, pos, chunk_end, failed_source.ip, failed_source.port, &source) != 0) {
+                source = task->source;
+            }
+        }
+        if (!got_chunk) {
             return NULL;
         }
         path_join(path, sizeof(path), task->cfg->shared_dir, task->tracker->filename);
@@ -397,26 +423,34 @@ static void *download_worker(void *arg) {
 
 static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
     long size = tracker->filesize;
-    long pos = 0;
+    long total_segments, next_segment = 0, start_segment = 0;
     int i;
     DownloadTask tasks[MAX_DOWNLOAD_THREADS];
     pthread_t threads[MAX_DOWNLOAD_THREADS];
     char final_path[MAX_PATH_LEN], md5[33], cache_track[MAX_PATH_LEN], track_name[300];
     FILE *fp;
     if (size <= 0) return -1;
+    total_segments = (size + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
+    if (getenv("PEER_START_SEGMENT")) {
+        start_segment = atol(getenv("PEER_START_SEGMENT"));
+        if (start_segment < 0) start_segment = 0;
+        if (total_segments > 0) start_segment %= total_segments;
+    }
     path_join(final_path, sizeof(final_path), cfg->shared_dir, tracker->filename);
     fp = fopen(final_path, "ab");
     if (fp) fclose(fp);
     snprintf(track_name, sizeof(track_name), "%s.track", tracker->filename);
-    while (pos < size) {
+    while (next_segment < total_segments) {
         int tasks_count = 0;
         memset(tasks, 0, sizeof(tasks));
-        while (tasks_count < MAX_DOWNLOAD_THREADS && pos < size) {
+        while (tasks_count < MAX_DOWNLOAD_THREADS && next_segment < total_segments) {
+            long segment = (start_segment + next_segment) % total_segments;
+            long pos = segment * SEGMENT_SIZE;
             long end = pos + SEGMENT_SIZE;
             if (end > size) end = size;
+            next_segment++;
             if (is_part_done(cfg, tracker->filename, pos, end)) {
                 send_updatetracker(cfg, tracker->filename, pos, end);
-                pos = end;
                 continue;
             }
             if (choose_source(tracker, pos, end, &tasks[tasks_count].source) != 0) {
@@ -435,8 +469,8 @@ static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
                 return -1;
             }
             tasks_count++;
-            pos = end;
         }
+        if (tasks_count == 0) continue;
         for (i = 0; i < tasks_count; i++) pthread_join(threads[i], NULL);
         for (i = 0; i < tasks_count; i++) {
             if (!tasks[i].ok) {
@@ -551,12 +585,27 @@ static void periodic_update_shared(const PeerConfig *cfg) {
     struct dirent *ent;
     if (!dir) return;
     while ((ent = readdir(dir)) != NULL) {
-        char path[MAX_PATH_LEN];
+        char path[MAX_PATH_LEN], parts_path[MAX_PATH_LEN];
         long size;
+        FILE *parts;
+        int sent_parts = 0;
         if (ent->d_name[0] == '.') continue;
         path_join(path, sizeof(path), cfg->shared_dir, ent->d_name);
         size = get_file_size(path);
-        if (size > 0) send_updatetracker(cfg, ent->d_name, 0, size);
+        if (size <= 0) continue;
+        part_file_path(cfg, ent->d_name, parts_path, sizeof(parts_path));
+        parts = fopen(parts_path, "r");
+        if (parts) {
+            long start, end;
+            while (fscanf(parts, "%ld %ld", &start, &end) == 2) {
+                if (start >= 0 && end > start && end <= size) {
+                    send_updatetracker(cfg, ent->d_name, start, end);
+                    sent_parts = 1;
+                }
+            }
+            fclose(parts);
+        }
+        if (!sent_parts) send_updatetracker(cfg, ent->d_name, 0, size);
     }
     closedir(dir);
 }
@@ -566,6 +615,7 @@ static void print_usage(void) {
     printf("  ./peer Peer1 peer1\n");
     printf("  ./peer Peer1 peer1 --seed\n");
     printf("  ./peer Peer3 peer3 --download file1.track file2.track\n");
+    printf("  PEER_STAY_ALIVE_AFTER_DOWNLOAD=1 keeps a downloader online as a seeder\n");
 }
 
 static void interactive_loop(PeerConfig *cfg) {
@@ -601,6 +651,7 @@ static void interactive_loop(PeerConfig *cfg) {
 int main(int argc, char **argv) {
     pthread_t server_tid;
     int i;
+    setvbuf(stdout, NULL, _IOLBF, 0);
     signal(SIGINT, stop_running);
     signal(SIGTERM, stop_running);
     if (argc < 3) {
@@ -624,7 +675,16 @@ int main(int argc, char **argv) {
     } else if (argc >= 5 && strcmp(argv[3], "--download") == 0) {
         request_list(&g_cfg);
         for (i = 4; i < argc; i++) get_and_download(&g_cfg, argv[i]);
-        sleep(2);
+        if (getenv("PEER_STAY_ALIVE_AFTER_DOWNLOAD")) {
+            printf("%s: staying online to serve downloaded files\n", g_cfg.id);
+            while (g_running) {
+                sleep(g_cfg.update_interval);
+                if (!g_running) break;
+                periodic_update_shared(&g_cfg);
+            }
+        } else {
+            sleep(2);
+        }
     } else {
         interactive_loop(&g_cfg);
     }
