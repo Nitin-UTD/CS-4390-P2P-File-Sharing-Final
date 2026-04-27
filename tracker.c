@@ -278,12 +278,16 @@ static void *worker(void *arg) {
     snprintf(cmd, sizeof(cmd), "%s", msg);
     strip_protocol_marks(cmd);
     if (strcasecmp(cmd, "REQ LIST") == 0) {
+        printf("tracker: REQ LIST\n");
         handle_list(sock);
     } else if (sscanf(cmd, "GET %255s", filename) == 1) {
+        printf("tracker: GET %s\n", filename);
         handle_get(sock, filename);
     } else if (strncasecmp(cmd, "createtracker ", 14) == 0) {
+        printf("tracker: %s\n", cmd);
         handle_createtracker(sock, cmd);
     } else if (strncasecmp(cmd, "updatetracker ", 14) == 0) {
+        printf("tracker: %s\n", cmd);
         handle_updatetracker(sock, cmd);
     } else {
         const char *reply = "<ERR unknown command>\n";
@@ -296,6 +300,7 @@ static void *worker(void *arg) {
 int main(int argc, char **argv) {
     int listen_sock;
     const char *cfg = argc > 1 ? argv[1] : "sconfig";
+    setvbuf(stdout, NULL, _IOLBF, 0);
     read_server_config(cfg);
     ensure_dir(g_cfg.tracker_dir);
     clear_tracker_dir();
