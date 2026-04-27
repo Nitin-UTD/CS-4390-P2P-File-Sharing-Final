@@ -369,6 +369,7 @@ static void *download_worker(void *arg) {
     DownloadTask *task = (DownloadTask *)arg;
     long pos;
     char path[MAX_PATH_LEN];
+    PeerEntry source = task->source;
     task->ok = 0;
     for (pos = task->start; pos < task->end; pos += CHUNK_SIZE) {
         long chunk_end = pos + CHUNK_SIZE;
@@ -376,9 +377,8 @@ static void *download_worker(void *arg) {
         size_t len = 0;
         FILE *fp;
         int attempt, got_chunk = 0;
-        PeerEntry source = task->source;
         if (chunk_end > task->end) chunk_end = task->end;
-        for (attempt = 0; attempt < 60; attempt++) {
+        for (attempt = 0; attempt < 120; attempt++) {
             PeerEntry failed_source = source;
             TrackerInfo fresh;
             char track_name[300];
@@ -387,13 +387,13 @@ static void *download_worker(void *arg) {
                 break;
             }
             snprintf(track_name, sizeof(track_name), "%s.track", task->tracker->filename);
-            sleep(2);
+            usleep(100000);
             if (get_tracker_file(task->cfg, track_name, &fresh) == 0 &&
                 choose_source_skip(&fresh, pos, chunk_end, failed_source.ip, failed_source.port, &source) == 0) {
                 continue;
             }
             if (choose_source_skip(task->tracker, pos, chunk_end, failed_source.ip, failed_source.port, &source) != 0) {
-                source = task->source;
+                source = failed_source;
             }
         }
         if (!got_chunk) {
@@ -673,10 +673,17 @@ int main(int argc, char **argv) {
             periodic_update_shared(&g_cfg);
         }
     } else if (argc >= 5 && strcmp(argv[3], "--download") == 0) {
+        int download_failed = 0;
         request_list(&g_cfg);
-        for (i = 4; i < argc; i++) get_and_download(&g_cfg, argv[i]);
+        for (i = 4; i < argc; i++) {
+            if (get_and_download(&g_cfg, argv[i]) != 0) download_failed = 1;
+        }
         if (getenv("PEER_STAY_ALIVE_AFTER_DOWNLOAD")) {
-            printf("%s: staying online to serve downloaded files\n", g_cfg.id);
+            if (download_failed) {
+                printf("%s: staying online to serve available files\n", g_cfg.id);
+            } else {
+                printf("%s: staying online to serve downloaded files\n", g_cfg.id);
+            }
             while (g_running) {
                 sleep(g_cfg.update_interval);
                 if (!g_running) break;
@@ -685,6 +692,8 @@ int main(int argc, char **argv) {
         } else {
             sleep(2);
         }
+        printf("%s terminated\n", g_cfg.id);
+        return download_failed ? 1 : 0;
     } else {
         interactive_loop(&g_cfg);
     }

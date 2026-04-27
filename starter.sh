@@ -6,17 +6,16 @@ mkdir -p torrents
 rm -f torrents/*.track
 
 WAVE1_CHUNK_DELAY_US=${WAVE1_CHUNK_DELAY_US:-0}
-WAVE2_CHUNK_DELAY_US=${WAVE2_CHUNK_DELAY_US:-325000}
+WAVE2_CHUNK_DELAY_US=${WAVE2_CHUNK_DELAY_US:-25000}
 
 TRACKER_PID=""
 P1=""
 P2=""
 WAVE1_PIDS=""
 WAVE2_PIDS=""
-TAIL_PID=""
 
 cleanup() {
-    for pid in $P1 $P2 $WAVE1_PIDS $WAVE2_PIDS $TRACKER_PID $TAIL_PID; do
+    for pid in $P1 $P2 $WAVE1_PIDS $WAVE2_PIDS $TRACKER_PID; do
         if [ -n "$pid" ]; then
             kill "$pid" 2>/dev/null || true
         fi
@@ -55,9 +54,8 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12 13; do
 done
 : > tracker.log
 
-tail -n +1 -f $ALL_LOGS &
-TAIL_PID=$!
-
+echo "Detailed peer and tracker output is written to tracker.log and peer*/logs/run.log."
+echo "The screen output is limited to demo milestones and a final event summary."
 echo "Wave 1 chunk delay is $WAVE1_CHUNK_DELAY_US microseconds per 1024-byte chunk."
 echo "Wave 2 chunk delay is $WAVE2_CHUNK_DELAY_US microseconds per 1024-byte chunk."
 echo "Time 0: starting tracker, Peer1, and Peer2."
@@ -123,9 +121,24 @@ kill "$TRACKER_PID" 2>/dev/null || true
 wait "$TRACKER_PID" 2>/dev/null || true
 TRACKER_PID=""
 
-kill "$TAIL_PID" 2>/dev/null || true
-wait "$TAIL_PID" 2>/dev/null || true
-TAIL_PID=""
+echo "Download summary:"
+grep -hE "File .*download complete|staying online to serve (downloaded|available) files|failed to download|MD5 check failed|terminated" peer*/logs/run.log || true
+
+echo "Tracker summary:"
+grep -hE "tracker: listening|tracker: created|tracker: REQ LIST|tracker: GET" tracker.log | head -40 || true
+
+MISSING=0
+for i in 3 4 5 6 7 8 9 10 11 12 13; do
+    if ! grep -q "Peer$i: File small.txt download complete" "peer$i/logs/run.log" ||
+       ! grep -q "Peer$i: File large.bin download complete" "peer$i/logs/run.log"; then
+        echo "Peer$i did not complete both downloads."
+        MISSING=1
+    fi
+done
 
 trap - INT TERM
+if [ "$MISSING" -ne 0 ]; then
+    echo "Demo failed. Check tracker.log and peer*/logs/run.log."
+    exit 1
+fi
 echo "Demo finished. Check tracker.log and peer*/logs/run.log."

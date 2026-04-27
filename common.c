@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 void trim(char *s) {
@@ -129,7 +130,11 @@ int recv_line(int sock, char *buf, size_t maxlen) {
 
 int connect_tcp(const char *ip, int port) {
     int sock;
+    int flags, err = 0;
+    socklen_t err_len = sizeof(err);
     struct sockaddr_in addr;
+    struct timeval timeout;
+    fd_set wfds;
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return -1;
     memset(&addr, 0, sizeof(addr));
@@ -139,10 +144,29 @@ int connect_tcp(const char *ip, int port) {
         close(sock);
         return -1;
     }
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
         close(sock);
         return -1;
     }
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0 && errno != EINPROGRESS) {
+        close(sock);
+        return -1;
+    }
+    FD_ZERO(&wfds);
+    FD_SET(sock, &wfds);
+    timeout.tv_sec = 2;
+    timeout.tv_usec = 0;
+    if (select(sock + 1, NULL, &wfds, NULL, &timeout) <= 0 ||
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &err_len) < 0 || err != 0) {
+        close(sock);
+        return -1;
+    }
+    fcntl(sock, F_SETFL, flags);
+    timeout.tv_sec = 3;
+    timeout.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     return sock;
 }
 
