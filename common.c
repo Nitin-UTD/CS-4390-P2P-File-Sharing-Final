@@ -128,6 +128,7 @@ int recv_line(int sock, char *buf, size_t maxlen) {
     return (int)used;
 }
 
+/* Connects with bounded timeouts so a dead peer cannot stall a download worker. */
 int connect_tcp(const char *ip, int port) {
     int sock;
     int flags, err = 0;
@@ -162,11 +163,17 @@ int connect_tcp(const char *ip, int port) {
         close(sock);
         return -1;
     }
-    fcntl(sock, F_SETFL, flags);
+    if (fcntl(sock, F_SETFL, flags) < 0) {
+        close(sock);
+        return -1;
+    }
     timeout.tv_sec = 3;
     timeout.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0 ||
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+        close(sock);
+        return -1;
+    }
     return sock;
 }
 
@@ -205,9 +212,9 @@ int get_local_ip(char *out, size_t outsz) {
     memset(&remote, 0, sizeof(remote));
     remote.sin_family = AF_INET;
     remote.sin_port = htons(80);
-    inet_pton(AF_INET, "8.8.8.8", &remote.sin_addr);
-    connect(sock, (struct sockaddr *)&remote, sizeof(remote));
-    if (getsockname(sock, (struct sockaddr *)&name, &namelen) == 0) {
+    if (inet_pton(AF_INET, "8.8.8.8", &remote.sin_addr) == 1 &&
+        connect(sock, (struct sockaddr *)&remote, sizeof(remote)) == 0 &&
+        getsockname(sock, (struct sockaddr *)&name, &namelen) == 0) {
         inet_ntop(AF_INET, &name.sin_addr, out, (socklen_t)outsz);
     } else {
         snprintf(out, outsz, "127.0.0.1");
@@ -263,6 +270,7 @@ typedef struct {
     unsigned char buffer[64];
 } MD5_CTX_LOCAL;
 
+/* MD5 follows the RFC 1321 reference algorithm; see README external code notice. */
 #define F(x,y,z) (((x) & (y)) | ((~x) & (z)))
 #define G(x,y,z) (((x) & (z)) | ((y) & (~z)))
 #define H(x,y,z) ((x) ^ (y) ^ (z))

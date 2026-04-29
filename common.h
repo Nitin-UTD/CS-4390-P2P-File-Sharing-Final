@@ -19,6 +19,7 @@ typedef struct {
     long timestamp;
 } PeerEntry;
 
+/* In-memory representation of the required .track file format. */
 typedef struct {
     char filename[256];
     long filesize;

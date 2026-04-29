@@ -29,31 +29,54 @@ static void copy_config_value(char *dst, size_t dstsz, const char *src) {
     dst[n] = '\0';
 }
 
-static void read_server_config(const char *path) {
+static int parse_config_int(const char *text, int min, int max, int *out) {
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (text == end || *end != '\0' || value < min || value > max) return -1;
+    *out = (int)value;
+    return 0;
+}
+
+static int read_required_line(FILE *fp, char *line, size_t line_sz, const char *field_name) {
+    if (!fgets(line, line_sz, fp)) {
+        printf("tracker config: missing %s\n", field_name);
+        return -1;
+    }
+    trim(line);
+    if (!*line) {
+        printf("tracker config: empty %s\n", field_name);
+        return -1;
+    }
+    return 0;
+}
+
+/* The tracker port, storage directory, and dead-peer timeout must come from sconfig. */
+static int read_server_config(const char *path) {
     FILE *fp = fopen(path, "r");
     char line[MAX_LINE];
-    g_cfg.port = 5000;
-    g_cfg.dead_timeout = DEFAULT_TRACKER_TIMEOUT;
-    snprintf(g_cfg.tracker_dir, sizeof(g_cfg.tracker_dir), "torrents");
     if (!fp) {
-        printf("tracker: could not open %s, using defaults\n", path);
-        return;
+        printf("tracker: cannot open required config %s\n", path);
+        return -1;
     }
-    if (fgets(line, sizeof(line), fp)) {
-        trim(line);
-        if (*line) g_cfg.port = atoi(line);
+    if (read_required_line(fp, line, sizeof(line), "port") != 0 ||
+        parse_config_int(line, 1, 65535, &g_cfg.port) != 0) {
+        printf("tracker: invalid port in %s\n", path);
+        fclose(fp);
+        return -1;
     }
-    if (fgets(line, sizeof(line), fp)) {
-        trim(line);
-        if (*line) {
-            copy_config_value(g_cfg.tracker_dir, sizeof(g_cfg.tracker_dir), line);
-        }
+    if (read_required_line(fp, line, sizeof(line), "tracker directory") != 0) {
+        fclose(fp);
+        return -1;
     }
-    if (fgets(line, sizeof(line), fp)) {
-        trim(line);
-        if (*line) g_cfg.dead_timeout = atoi(line);
+    copy_config_value(g_cfg.tracker_dir, sizeof(g_cfg.tracker_dir), line);
+    if (read_required_line(fp, line, sizeof(line), "dead-peer timeout") != 0 ||
+        parse_config_int(line, 1, 86400, &g_cfg.dead_timeout) != 0) {
+        printf("tracker: invalid dead-peer timeout in %s\n", path);
+        fclose(fp);
+        return -1;
     }
     fclose(fp);
+    return 0;
 }
 
 static int has_track_suffix(const char *name) {
@@ -61,13 +84,14 @@ static int has_track_suffix(const char *name) {
     return n > 6 && strcmp(name + n - 6, ".track") == 0;
 }
 
-static void clear_tracker_dir(void) {
+/* A new tracker run starts with an empty tracker-file directory. */
+static int clear_tracker_dir(void) {
     DIR *dir;
     struct dirent *ent;
     char path[MAX_PATH_LEN];
-    ensure_dir(g_cfg.tracker_dir);
+    if (ensure_dir(g_cfg.tracker_dir) != 0) return -1;
     dir = opendir(g_cfg.tracker_dir);
-    if (!dir) return;
+    if (!dir) return -1;
     while ((ent = readdir(dir)) != NULL) {
         if (has_track_suffix(ent->d_name)) {
             path_join(path, sizeof(path), g_cfg.tracker_dir, ent->d_name);
@@ -75,6 +99,7 @@ static void clear_tracker_dir(void) {
         }
     }
     closedir(dir);
+    return 0;
 }
 
 static void tracker_path(char *out, size_t outsz, const char *track_name) {
@@ -87,12 +112,13 @@ static int read_tracker_file(const char *path, TrackerInfo *info, char **text_ou
     unsigned char *data = NULL;
     size_t len = 0;
     if (read_entire_file(path, &data, &len) != 0) return -1;
-    if (text_out) *text_out = (char *)data;
     if (parse_tracker_text((char *)data, info) != 0) {
-        if (!text_out) free(data);
+        free(data);
+        if (text_out) *text_out = NULL;
         return -1;
     }
-    if (!text_out) free(data);
+    if (text_out) *text_out = (char *)data;
+    else free(data);
     return 0;
 }
 
@@ -126,6 +152,7 @@ static void remove_dead_peers(TrackerInfo *info) {
     info->peer_count = out;
 }
 
+/* LIST replies with one row per tracker file: index, file name, size, and MD5. */
 static void handle_list(int sock) {
     DIR *dir;
     struct dirent *ent;
@@ -154,6 +181,7 @@ static void handle_list(int sock) {
     send_all(sock, response, strlen(response));
 }
 
+/* GET wraps the tracker file text with begin/end markers and an MD5 checksum. */
 static void handle_get(int sock, const char *track_name) {
     char path[MAX_PATH_LEN];
     unsigned char *data = NULL;
@@ -178,6 +206,7 @@ static void handle_get(int sock, const char *track_name) {
     free(data);
 }
 
+/* createtracker creates the initial tracker entry and first complete peer range. */
 static void handle_createtracker(int sock, char *msg) {
     char cmd[64], filename[256], description[512], md5[33], ip[64];
     int port;
@@ -185,6 +214,10 @@ static void handle_createtracker(int sock, char *msg) {
     char path[MAX_PATH_LEN];
     TrackerInfo info;
     if (sscanf(msg, "%63s %255s %ld %511s %32s %63s %d", cmd, filename, &filesize, description, md5, ip, &port) != 7) {
+        send_all(sock, "<createtracker fail>\n", 21);
+        return;
+    }
+    if (filesize <= 0 || strlen(md5) != 32 || port <= 0 || port > 65535) {
         send_all(sock, "<createtracker fail>\n", 21);
         return;
     }
@@ -217,6 +250,7 @@ static void handle_createtracker(int sock, char *msg) {
     }
 }
 
+/* updatetracker refreshes or adds a peer range, dropping stale peers first. */
 static void handle_updatetracker(int sock, char *msg) {
     char cmd[64], filename[256], ip[64], path[MAX_PATH_LEN];
     int port;
@@ -224,6 +258,10 @@ static void handle_updatetracker(int sock, char *msg) {
     TrackerInfo info;
     int i, found = 0;
     if (sscanf(msg, "%63s %255s %ld %ld %63s %d", cmd, filename, &start, &end, ip, &port) != 6) {
+        send_all(sock, "<updatetracker unknown fail>\n", 29);
+        return;
+    }
+    if (start < 0 || end <= start || port <= 0 || port > 65535) {
         send_all(sock, "<updatetracker unknown fail>\n", 29);
         return;
     }
@@ -238,6 +276,13 @@ static void handle_updatetracker(int sock, char *msg) {
         return;
     }
     remove_dead_peers(&info);
+    if (end > info.filesize) {
+        char reply[MAX_LINE];
+        pthread_mutex_unlock(&g_file_lock);
+        snprintf(reply, sizeof(reply), "<updatetracker %s fail>\n", filename);
+        send_all(sock, reply, strlen(reply));
+        return;
+    }
     for (i = 0; i < info.peer_count; i++) {
         PeerEntry *p = &info.peers[i];
         if (strcmp(p->ip, ip) == 0 && p->port == port && p->start == start && p->end == end) {
@@ -253,6 +298,12 @@ static void handle_updatetracker(int sock, char *msg) {
         p->start = start;
         p->end = end;
         p->timestamp = (long)time(NULL);
+    } else if (!found) {
+        char reply[MAX_LINE];
+        pthread_mutex_unlock(&g_file_lock);
+        snprintf(reply, sizeof(reply), "<updatetracker %s fail>\n", filename);
+        send_all(sock, reply, strlen(reply));
+        return;
     }
     if (write_tracker_info(path, &info) == 0) {
         char reply[MAX_LINE];
@@ -301,9 +352,11 @@ int main(int argc, char **argv) {
     int listen_sock;
     const char *cfg = argc > 1 ? argv[1] : "sconfig";
     setvbuf(stdout, NULL, _IOLBF, 0);
-    read_server_config(cfg);
-    ensure_dir(g_cfg.tracker_dir);
-    clear_tracker_dir();
+    if (read_server_config(cfg) != 0) return 1;
+    if (clear_tracker_dir() != 0) {
+        printf("tracker: cannot prepare tracker directory %s\n", g_cfg.tracker_dir);
+        return 1;
+    }
     listen_sock = create_listen_socket(g_cfg.port);
     if (listen_sock < 0) {
         perror("tracker listen");

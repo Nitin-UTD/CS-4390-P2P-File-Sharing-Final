@@ -56,71 +56,106 @@ static void stop_running(int sig) {
     g_running = 0;
 }
 
-static void read_client_config(PeerConfig *cfg) {
-    char path[MAX_PATH_LEN], line[MAX_LINE];
-    FILE *fp;
-    cfg->tracker_port = 5000;
-    cfg->update_interval = 30;
-    snprintf(cfg->tracker_ip, sizeof(cfg->tracker_ip), "127.0.0.1");
-    path_join(path, sizeof(path), cfg->root, "clientThreadConfig.cfg");
-    fp = fopen(path, "r");
-    if (!fp) return;
-    if (fgets(line, sizeof(line), fp)) {
-        trim(line);
-        if (*line) cfg->tracker_port = atoi(line);
-    }
-    if (fgets(line, sizeof(line), fp)) {
-        trim(line);
-        if (*line) {
-            copy_config_value(cfg->tracker_ip, sizeof(cfg->tracker_ip), line);
-        }
-    }
-    if (fgets(line, sizeof(line), fp)) {
-        trim(line);
-        if (*line) cfg->update_interval = atoi(line);
-    }
-    fclose(fp);
+static int parse_config_int(const char *text, int min, int max, int *out) {
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (text == end || *end != '\0' || value < min || value > max) return -1;
+    *out = (int)value;
+    return 0;
 }
 
-static void read_server_config(PeerConfig *cfg) {
-    char path[MAX_PATH_LEN], line[MAX_LINE], shared[MAX_PATH_LEN] = "shared";
+static int read_required_line(FILE *fp, char *line, size_t line_sz, const char *field_name) {
+    if (!fgets(line, line_sz, fp)) {
+        printf("peer config: missing %s\n", field_name);
+        return -1;
+    }
+    trim(line);
+    if (!*line) {
+        printf("peer config: empty %s\n", field_name);
+        return -1;
+    }
+    return 0;
+}
+
+/* Each peer must get tracker and upload-server settings from its own config files. */
+static int read_client_config(PeerConfig *cfg) {
+    char path[MAX_PATH_LEN], line[MAX_LINE];
     FILE *fp;
-    cfg->listen_port = 6001;
+    path_join(path, sizeof(path), cfg->root, "clientThreadConfig.cfg");
+    fp = fopen(path, "r");
+    if (!fp) {
+        printf("%s: cannot open required config %s\n", cfg->id, path);
+        return -1;
+    }
+    if (read_required_line(fp, line, sizeof(line), "tracker port") != 0 ||
+        parse_config_int(line, 1, 65535, &cfg->tracker_port) != 0) {
+        printf("%s: invalid tracker port in %s\n", cfg->id, path);
+        fclose(fp);
+        return -1;
+    }
+    if (read_required_line(fp, line, sizeof(line), "tracker IP") != 0) {
+        fclose(fp);
+        return -1;
+    }
+    if (strcmp(line, "AUTO") != 0) {
+        struct in_addr tmp;
+        if (inet_pton(AF_INET, line, &tmp) <= 0) {
+            printf("%s: invalid tracker IP in %s\n", cfg->id, path);
+            fclose(fp);
+            return -1;
+        }
+    }
+    copy_config_value(cfg->tracker_ip, sizeof(cfg->tracker_ip), line);
+    if (read_required_line(fp, line, sizeof(line), "update interval") != 0 ||
+        parse_config_int(line, 1, 86400, &cfg->update_interval) != 0) {
+        printf("%s: invalid update interval in %s\n", cfg->id, path);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    return 0;
+}
+
+static int read_server_config(PeerConfig *cfg) {
+    char path[MAX_PATH_LEN], line[MAX_LINE], shared[MAX_PATH_LEN];
+    FILE *fp;
     path_join(path, sizeof(path), cfg->root, "serverThreadConfig.cfg");
     fp = fopen(path, "r");
     if (!fp) {
-        path_join(cfg->shared_dir, sizeof(cfg->shared_dir), cfg->root, shared);
-        return;
+        printf("%s: cannot open required config %s\n", cfg->id, path);
+        return -1;
     }
-    if (fgets(line, sizeof(line), fp)) {
-        trim(line);
-        if (*line) cfg->listen_port = atoi(line);
+    if (read_required_line(fp, line, sizeof(line), "peer listen port") != 0 ||
+        parse_config_int(line, 1, 65535, &cfg->listen_port) != 0) {
+        printf("%s: invalid listen port in %s\n", cfg->id, path);
+        fclose(fp);
+        return -1;
     }
-    if (fgets(line, sizeof(line), fp)) {
-        trim(line);
-        if (*line) {
-            copy_config_value(shared, sizeof(shared), line);
-        }
+    if (read_required_line(fp, shared, sizeof(shared), "shared directory") != 0) {
+        fclose(fp);
+        return -1;
     }
     fclose(fp);
     if (shared[0] == '/') snprintf(cfg->shared_dir, sizeof(cfg->shared_dir), "%s", shared);
     else path_join(cfg->shared_dir, sizeof(cfg->shared_dir), cfg->root, shared);
+    return 0;
 }
 
-static void init_config(PeerConfig *cfg, const char *id, const char *root) {
+static int init_config(PeerConfig *cfg, const char *id, const char *root) {
     memset(cfg, 0, sizeof(*cfg));
     snprintf(cfg->id, sizeof(cfg->id), "%s", id ? id : "Peer");
     snprintf(cfg->root, sizeof(cfg->root), "%s", root ? root : ".");
     path_join(cfg->cache_dir, sizeof(cfg->cache_dir), cfg->root, "cache");
     path_join(cfg->downloads_dir, sizeof(cfg->downloads_dir), cfg->root, "downloads");
-    read_client_config(cfg);
-    read_server_config(cfg);
-    ensure_dir(cfg->root);
-    ensure_dir(cfg->shared_dir);
-    ensure_dir(cfg->cache_dir);
-    ensure_dir(cfg->downloads_dir);
+    if (read_client_config(cfg) != 0 || read_server_config(cfg) != 0) return -1;
+    if (ensure_dir(cfg->root) != 0 || ensure_dir(cfg->shared_dir) != 0 ||
+        ensure_dir(cfg->cache_dir) != 0 || ensure_dir(cfg->downloads_dir) != 0) {
+        printf("%s: could not create required peer directories\n", cfg->id);
+        return -1;
+    }
     get_local_ip(cfg->local_ip, sizeof(cfg->local_ip));
     if (strcmp(cfg->tracker_ip, "AUTO") == 0) snprintf(cfg->tracker_ip, sizeof(cfg->tracker_ip), "%s", cfg->local_ip);
+    return 0;
 }
 
 static int tracker_request(const PeerConfig *cfg, const char *msg, char **reply_out, size_t *reply_len) {
@@ -141,15 +176,23 @@ static int tracker_request(const PeerConfig *cfg, const char *msg, char **reply_
     }
     while ((n = recv(sock, buf, sizeof(buf), 0)) > 0) {
         if (len + (size_t)n + 1 > cap) {
+            char *tmp;
             cap *= 2;
-            reply = realloc(reply, cap);
-            if (!reply) {
+            tmp = realloc(reply, cap);
+            if (!tmp) {
+                free(reply);
                 close(sock);
                 return -1;
             }
+            reply = tmp;
         }
         memcpy(reply + len, buf, (size_t)n);
         len += (size_t)n;
+    }
+    if (n < 0) {
+        free(reply);
+        close(sock);
+        return -1;
     }
     close(sock);
     reply[len] = '\0';
@@ -238,6 +281,7 @@ static int extract_tracker_body(const char *reply, char **body_out, char md5[33]
     return 0;
 }
 
+/* GET returns a tracker file plus an MD5 of the tracker text; verify before parsing. */
 static int get_tracker_file(const PeerConfig *cfg, const char *track_name, TrackerInfo *info) {
     char msg[MAX_LINE], *reply = NULL, *body = NULL, md5_expected[33], md5_actual[33], cache_path[MAX_PATH_LEN];
     snprintf(msg, sizeof(msg), "<GET %s>\n", track_name);
@@ -259,7 +303,12 @@ static int get_tracker_file(const PeerConfig *cfg, const char *track_name, Track
         return -1;
     }
     path_join(cache_path, sizeof(cache_path), cfg->cache_dir, track_name);
-    write_entire_file(cache_path, (unsigned char *)body, strlen(body));
+    if (write_entire_file(cache_path, (unsigned char *)body, strlen(body)) != 0) {
+        printf("%s: cannot cache tracker file %s\n", cfg->id, track_name);
+        free(reply);
+        free(body);
+        return -1;
+    }
     if (parse_tracker_text(body, info) != 0) {
         printf("%s: cannot parse tracker file\n", cfg->id);
         free(reply);
@@ -320,7 +369,10 @@ static void mark_part_done(const PeerConfig *cfg, const char *filename, long sta
     if (is_part_done(cfg, filename, start, end)) return;
     part_file_path(cfg, filename, path, sizeof(path));
     fp = fopen(path, "a");
-    if (!fp) return;
+    if (!fp) {
+        printf("%s: cannot update part cache for %s\n", cfg->id, filename);
+        return;
+    }
     fprintf(fp, "%ld %ld\n", start, end);
     fclose(fp);
 }
@@ -358,13 +410,10 @@ static int request_chunk(const PeerConfig *cfg, const PeerEntry *src, const char
     close(sock);
     printf("%s: downloading %ld to %ld bytes of %s from %s %d\n",
            cfg->id, start, end, filename, src->ip, src->port);
-    if (getenv("DEMO_CHUNK_DELAY_US")) {
-        long delay = atol(getenv("DEMO_CHUNK_DELAY_US"));
-        if (delay > 0) usleep((useconds_t)delay);
-    }
     return 0;
 }
 
+/* A segment is downloaded in 1024-byte chunks and retried from fresh tracker data. */
 static void *download_worker(void *arg) {
     DownloadTask *task = (DownloadTask *)arg;
     long pos;
@@ -423,7 +472,7 @@ static void *download_worker(void *arg) {
 
 static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
     long size = tracker->filesize;
-    long total_segments, next_segment = 0, start_segment = 0;
+    long total_segments, next_segment = 0;
     int i;
     DownloadTask tasks[MAX_DOWNLOAD_THREADS];
     pthread_t threads[MAX_DOWNLOAD_THREADS];
@@ -431,11 +480,6 @@ static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
     FILE *fp;
     if (size <= 0) return -1;
     total_segments = (size + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
-    if (getenv("PEER_START_SEGMENT")) {
-        start_segment = atol(getenv("PEER_START_SEGMENT"));
-        if (start_segment < 0) start_segment = 0;
-        if (total_segments > 0) start_segment %= total_segments;
-    }
     path_join(final_path, sizeof(final_path), cfg->shared_dir, tracker->filename);
     fp = fopen(final_path, "ab");
     if (fp) fclose(fp);
@@ -444,7 +488,7 @@ static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
         int tasks_count = 0;
         memset(tasks, 0, sizeof(tasks));
         while (tasks_count < MAX_DOWNLOAD_THREADS && next_segment < total_segments) {
-            long segment = (start_segment + next_segment) % total_segments;
+            long segment = next_segment;
             long pos = segment * SEGMENT_SIZE;
             long end = pos + SEGMENT_SIZE;
             if (end > size) end = size;
@@ -574,12 +618,15 @@ static void seed_all_shared_files(const PeerConfig *cfg) {
         if (ent->d_name[0] == '.') continue;
         path_join(path, sizeof(path), cfg->shared_dir, ent->d_name);
         if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
-            send_createtracker(cfg, ent->d_name, "shared_file");
+            if (send_createtracker(cfg, ent->d_name, "shared_file") != 0) {
+                printf("%s: failed to seed %s\n", cfg->id, ent->d_name);
+            }
         }
     }
     closedir(dir);
 }
 
+/* Advertise only complete segments for partial downloads; full files advertise whole range. */
 static void periodic_update_shared(const PeerConfig *cfg) {
     DIR *dir = opendir(cfg->shared_dir);
     struct dirent *ent;
@@ -614,8 +661,7 @@ static void print_usage(void) {
     printf("Usage:\n");
     printf("  ./peer Peer1 peer1\n");
     printf("  ./peer Peer1 peer1 --seed\n");
-    printf("  ./peer Peer3 peer3 --download file1.track file2.track\n");
-    printf("  PEER_STAY_ALIVE_AFTER_DOWNLOAD=1 keeps a downloader online as a seeder\n");
+    printf("  ./peer Peer3 peer3 --download file1.track file2.track [--stay]\n");
 }
 
 static void interactive_loop(PeerConfig *cfg) {
@@ -658,7 +704,7 @@ int main(int argc, char **argv) {
         print_usage();
         return 1;
     }
-    init_config(&g_cfg, argv[1], argv[2]);
+    if (init_config(&g_cfg, argv[1], argv[2]) != 0) return 1;
     if (pthread_create(&server_tid, NULL, peer_server, &g_cfg) != 0) {
         perror("peer server thread");
         return 1;
@@ -673,12 +719,26 @@ int main(int argc, char **argv) {
             periodic_update_shared(&g_cfg);
         }
     } else if (argc >= 5 && strcmp(argv[3], "--download") == 0) {
-        int download_failed = 0;
+        int download_failed = 0, stay_online = 0, track_count = 0;
         request_list(&g_cfg);
         for (i = 4; i < argc; i++) {
+            if (strcmp(argv[i], "--stay") == 0) {
+                stay_online = 1;
+                continue;
+            }
+            if (argv[i][0] == '-') {
+                printf("%s: unknown download option %s\n", g_cfg.id, argv[i]);
+                download_failed = 1;
+                continue;
+            }
+            track_count++;
             if (get_and_download(&g_cfg, argv[i]) != 0) download_failed = 1;
         }
-        if (getenv("PEER_STAY_ALIVE_AFTER_DOWNLOAD")) {
+        if (track_count == 0) {
+            printf("%s: no tracker files requested\n", g_cfg.id);
+            download_failed = 1;
+        }
+        if (stay_online) {
             if (download_failed) {
                 printf("%s: staying online to serve available files\n", g_cfg.id);
             } else {

@@ -26,4 +26,11 @@ peer-folders: peer
 clean:
 	rm -f tracker peer *.o
 
-.PHONY: all clean peer-folders
+submit-clean: clean
+	rm -f tracker.log
+	rm -f torrents/*.track
+	rm -f peer*/logs/*.log
+	rm -f peer*/cache/*.track peer*/cache/*.parts
+	rm -f peer*/shared/* peer*/downloads/*
+
+.PHONY: all clean submit-clean peer-folders

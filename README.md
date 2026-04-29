@@ -50,7 +50,11 @@ tracker-ip
 periodic-update-interval-seconds
 ```
 
-The peer config files use `900` seconds, which is the required 15-minute default. The demo script temporarily writes `15` seconds into the peer configs before it starts the automated run so the demo produces visible tracker refreshes.
+The peer config files use `900` seconds, which is the required 15-minute default. `starter.sh` also uses `900` seconds by default and keeps the original seed peers online until validation completes. If a faster classroom failure/recovery demo is needed, run it with explicit overrides:
+
+```sh
+PEER_UPDATE_INTERVAL=15 STOP_SEEDERS_AT_WAVE2=1 sh starter.sh
+```
 
 `serverThreadConfig.cfg`:
 
@@ -71,6 +75,14 @@ Start an interactive peer:
 
 ```sh
 ./peer Peer1 peer1
+```
+
+Start a non-interactive seed or downloader:
+
+```sh
+./peer Peer1 peer1 --seed
+./peer Peer3 peer3 --download small.txt.track large.bin.track
+./peer Peer3 peer3 --download small.txt.track large.bin.track --stay
 ```
 
 Manual peer commands:
@@ -100,7 +112,14 @@ The script:
 3. starts `Peer1` and `Peer2` as seed peers
 4. starts `Peer3` through `Peer8` after 30 seconds
 5. starts `Peer9` through `Peer13` after 1 minute 30 seconds
-6. stops `Peer1` and `Peer2`
+6. validates that `Peer3` through `Peer13` download both files
+7. stops all running peers and the tracker
+
+To run the old classroom demo behavior where `Peer1` and `Peer2` stop when `Peer9` through `Peer13` start, use:
+
+```sh
+PEER_UPDATE_INTERVAL=15 STOP_SEEDERS_AT_WAVE2=1 sh starter.sh
+```
 
 Logs are written to:
 
@@ -136,4 +155,6 @@ when the request is invalid.
 
 ## External Code Notice
 
-The MD5 implementation in `common.c` follows the standard RSA Data Security, Inc. MD5 algorithm structure from RFC 1321-style public reference implementations. Cite RFC 1321 / RSA MD5 reference code in the final report.
+The MD5 implementation in `common.c` follows the standard RSA Data Security, Inc. MD5 algorithm structure from RFC 1321-style public reference implementations.
+
+Reference: RFC 1321, The MD5 Message-Digest Algorithm, https://www.rfc-editor.org/rfc/rfc1321
