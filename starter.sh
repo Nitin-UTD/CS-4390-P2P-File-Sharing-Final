@@ -6,7 +6,6 @@ mkdir -p torrents
 rm -f torrents/*.track
 
 PEER_UPDATE_INTERVAL=${PEER_UPDATE_INTERVAL:-900}
-STOP_SEEDERS_AT_WAVE2=${STOP_SEEDERS_AT_WAVE2:-0}
 export PEER_UPDATE_INTERVAL
 
 TRACKER_PID=""
@@ -70,11 +69,7 @@ done
 echo "Detailed peer and tracker output is written to tracker.log and peer*/logs/run.log."
 echo "The screen output is limited to demo milestones and a final event summary."
 echo "Peer update interval is $PEER_UPDATE_INTERVAL seconds."
-if [ "$STOP_SEEDERS_AT_WAVE2" = "1" ]; then
-    echo "Seeder stop mode: Peer1 and Peer2 stop when Peer9 through Peer13 start."
-else
-    echo "Seeder stop mode: Peer1 and Peer2 stay online until validation completes."
-fi
+echo "Seeder mode: Peer1 and Peer2 stay online until validation completes."
 echo "Time 0: starting tracker, Peer1, and Peer2."
 ./tracker sconfig > tracker.log 2>&1 &
 TRACKER_PID=$!
@@ -99,15 +94,7 @@ for i in 9 10 11 12 13; do
     WAVE2_PIDS="$WAVE2_PIDS $!"
 done
 
-if [ "$STOP_SEEDERS_AT_WAVE2" = "1" ]; then
-    echo "Time 1 minute 30 seconds: stopping Peer1 and Peer2."
-    stop_peer_pid "$P1" "Peer1"
-    stop_peer_pid "$P2" "Peer2"
-    P1=""
-    P2=""
-else
-    echo "Time 1 minute 30 seconds: Peer1 and Peer2 remain online for final validation."
-fi
+echo "Time 1 minute 30 seconds: Peer1 and Peer2 remain online for final validation."
 
 for pid in $WAVE2_PIDS; do
     wait "$pid" || true

@@ -50,11 +50,7 @@ tracker-ip
 periodic-update-interval-seconds
 ```
 
-The peer config files use `900` seconds, which is the required 15-minute default. `starter.sh` also uses `900` seconds by default and keeps the original seed peers online until validation completes. If a faster classroom failure/recovery demo is needed, run it with explicit overrides:
-
-```sh
-PEER_UPDATE_INTERVAL=15 STOP_SEEDERS_AT_WAVE2=1 sh starter.sh
-```
+The peer config files use `900` seconds, which is the required 15-minute default. `starter.sh` also uses `900` seconds by default and keeps the original seed peers online until validation completes.
 
 `serverThreadConfig.cfg`:
 
@@ -114,12 +110,6 @@ The script:
 5. starts `Peer9` through `Peer13` after 1 minute 30 seconds
 6. validates that `Peer3` through `Peer13` download both files
 7. stops all running peers and the tracker
-
-To run the old classroom demo behavior where `Peer1` and `Peer2` stop when `Peer9` through `Peer13` start, use:
-
-```sh
-PEER_UPDATE_INTERVAL=15 STOP_SEEDERS_AT_WAVE2=1 sh starter.sh
-```
 
 Logs are written to:
 
