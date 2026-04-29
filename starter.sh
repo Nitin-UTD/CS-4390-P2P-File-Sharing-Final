@@ -13,9 +13,10 @@ P1=""
 P2=""
 WAVE1_PIDS=""
 WAVE2_PIDS=""
+PROGRESS_PID=""
 
 cleanup() {
-    for pid in $P1 $P2 $WAVE1_PIDS $WAVE2_PIDS $TRACKER_PID; do
+    for pid in $PROGRESS_PID $P1 $P2 $WAVE1_PIDS $WAVE2_PIDS $TRACKER_PID; do
         if [ -n "$pid" ]; then
             kill "$pid" 2>/dev/null || true
         fi
@@ -31,6 +32,36 @@ stop_peer_pid() {
         wait "$pid" 2>/dev/null || true
         echo "$label terminated"
     fi
+}
+
+start_progress() {
+    label="$1"
+    (
+        seconds=0
+        while :; do
+            seconds=$((seconds + 1))
+            printf "\r%s for %d seconds..." "$label" "$seconds"
+            sleep 1
+        done
+    ) &
+    PROGRESS_PID=$!
+}
+
+stop_progress() {
+    if [ -n "$PROGRESS_PID" ]; then
+        kill "$PROGRESS_PID" 2>/dev/null || true
+        wait "$PROGRESS_PID" 2>/dev/null || true
+        PROGRESS_PID=""
+        printf "\n"
+    fi
+}
+
+progress_sleep() {
+    seconds="$1"
+    label="$2"
+    start_progress "$label"
+    sleep "$seconds"
+    stop_progress
 }
 
 python3 - <<'PY'
@@ -67,7 +98,7 @@ done
 : > tracker.log
 
 echo "Detailed peer and tracker output is written to tracker.log and peer*/logs/run.log."
-echo "The screen output is limited to demo milestones and a final event summary."
+echo "The screen output shows milestones, live progress counters, and a final event summary."
 echo "Peer update interval is $PEER_UPDATE_INTERVAL seconds."
 echo "Seeder mode: Peer1 and Peer2 stay online until validation completes."
 echo "Time 0: starting tracker, Peer1, and Peer2."
@@ -80,14 +111,14 @@ P1=$!
 ./peer Peer2 peer2 --seed > peer2/logs/run.log 2>&1 &
 P2=$!
 
-sleep 30
+progress_sleep 30 "Waiting to start Peer3 through Peer8"
 echo "Time 30 seconds: starting Peer3 through Peer8."
 for i in 3 4 5 6 7 8; do
     ./peer Peer$i peer$i --download small.txt.track large.bin.track --stay > peer$i/logs/run.log 2>&1 &
     WAVE1_PIDS="$WAVE1_PIDS $!"
 done
 
-sleep 60
+progress_sleep 60 "Running Peer3 through Peer8 before starting Peer9 through Peer13"
 echo "Time 1 minute 30 seconds: starting Peer9 through Peer13."
 for i in 9 10 11 12 13; do
     ./peer Peer$i peer$i --download small.txt.track large.bin.track > peer$i/logs/run.log 2>&1 &
@@ -96,9 +127,11 @@ done
 
 echo "Time 1 minute 30 seconds: Peer1 and Peer2 remain online for final validation."
 
+start_progress "Running Peer9 through Peer13"
 for pid in $WAVE2_PIDS; do
     wait "$pid" || true
 done
+stop_progress
 WAVE2_PIDS=""
 
 for pid in $WAVE1_PIDS; do

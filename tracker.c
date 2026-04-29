@@ -1,5 +1,6 @@
 #include "common.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
@@ -206,6 +207,54 @@ static void handle_get(int sock, const char *track_name) {
     free(data);
 }
 
+static int pop_last_token(char *text, char *out, size_t outsz) {
+    char *start, *end;
+    size_t len;
+    trim(text);
+    if (!*text || outsz == 0) return -1;
+    end = text + strlen(text);
+    start = end;
+    while (start > text && !isspace((unsigned char)*(start - 1))) start--;
+    len = (size_t)(end - start);
+    if (len == 0 || len >= outsz) return -1;
+    memcpy(out, start, len);
+    out[len] = '\0';
+    while (start > text && isspace((unsigned char)*(start - 1))) start--;
+    *start = '\0';
+    trim(text);
+    return 0;
+}
+
+static int parse_createtracker_message(const char *msg, char *cmd, size_t cmd_sz,
+                                       char *filename, size_t filename_sz, long *filesize,
+                                       char *description, size_t description_sz,
+                                       char *md5, size_t md5_sz, char *ip, size_t ip_sz,
+                                       int *port) {
+    char rest[MAX_LINE], port_text[32];
+    char *end = NULL;
+    int consumed = 0;
+    long parsed_port;
+    if (sscanf(msg, "%63s %255s %ld %n", cmd, filename, filesize, &consumed) != 3 ||
+        consumed <= 0 || strcmp(cmd, "createtracker") != 0) {
+        return -1;
+    }
+    snprintf(rest, sizeof(rest), "%s", msg + consumed);
+    if (pop_last_token(rest, port_text, sizeof(port_text)) != 0 ||
+        pop_last_token(rest, ip, ip_sz) != 0 ||
+        pop_last_token(rest, md5, md5_sz) != 0 ||
+        !*rest) {
+        return -1;
+    }
+    parsed_port = strtol(port_text, &end, 10);
+    if (port_text == end || *end != '\0' || parsed_port < 1 || parsed_port > 65535) return -1;
+    if (strlen(rest) >= description_sz) return -1;
+    copy_config_value(description, description_sz, rest);
+    *port = (int)parsed_port;
+    (void)cmd_sz;
+    (void)filename_sz;
+    return 0;
+}
+
 /* createtracker creates the initial tracker entry and first complete peer range. */
 static void handle_createtracker(int sock, char *msg) {
     char cmd[64], filename[256], description[512], md5[33], ip[64];
@@ -213,7 +262,9 @@ static void handle_createtracker(int sock, char *msg) {
     long filesize;
     char path[MAX_PATH_LEN];
     TrackerInfo info;
-    if (sscanf(msg, "%63s %255s %ld %511s %32s %63s %d", cmd, filename, &filesize, description, md5, ip, &port) != 7) {
+    if (parse_createtracker_message(msg, cmd, sizeof(cmd), filename, sizeof(filename),
+                                    &filesize, description, sizeof(description),
+                                    md5, sizeof(md5), ip, sizeof(ip), &port) != 0) {
         send_all(sock, "<createtracker fail>\n", 21);
         return;
     }

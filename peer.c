@@ -1,6 +1,7 @@
 #include "common.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
@@ -678,13 +679,25 @@ static void print_usage(void) {
     printf("  ./peer Peer3 peer3 --download file1.track file2.track [--stay]\n");
 }
 
+static const char *skip_ws(const char *s) {
+    while (*s && isspace((unsigned char)*s)) s++;
+    return s;
+}
+
+static int is_integer_token(const char *s) {
+    char *end = NULL;
+    if (!s || !*s) return 0;
+    strtol(s, &end, 10);
+    return s != end && *end == '\0';
+}
+
 static void interactive_loop(PeerConfig *cfg) {
     char line[MAX_LINE];
     printf("%s: enter commands: LIST, GET file.track, createtracker file desc, updatetracker file start end, quit\n", cfg->id);
     while (g_running && fgets(line, sizeof(line), stdin)) {
-        char a[256] = "", b[512] = "";
-        char file[256] = "", desc[512] = "", md5[64] = "", ip[64] = "";
-        long filesize, start, end;
+        char a[256] = "";
+        char file[256] = "", ip[64] = "";
+        long start, end;
         int port;
         trim(line);
         if (!*line) continue;
@@ -693,14 +706,28 @@ static void interactive_loop(PeerConfig *cfg) {
             request_list(cfg);
         } else if (sscanf(line, "GET %255s", a) == 1) {
             get_and_download(cfg, a);
-        } else if (sscanf(line, "createtracker %255s %ld %511s %63s %63s %d",
-                          file, &filesize, desc, md5, ip, &port) == 6) {
-            send_raw_tracker_command(cfg, line);
+        } else if (strncasecmp(line, "createtracker", 13) == 0 &&
+                   isspace((unsigned char)line[13])) {
+            const char *p = skip_ws(line + 13);
+            int used = 0;
+            if (sscanf(p, "%255s%n", file, &used) != 1) {
+                printf("%s: invalid createtracker command\n", cfg->id);
+                continue;
+            }
+            p = skip_ws(p + used);
+            if (!*p) {
+                send_createtracker(cfg, file, "shared_file");
+            } else {
+                char next[64] = "";
+                if (sscanf(p, "%63s", next) == 1 && is_integer_token(next)) {
+                    send_raw_tracker_command(cfg, line);
+                } else {
+                    send_createtracker(cfg, file, p);
+                }
+            }
         } else if (sscanf(line, "updatetracker %255s %ld %ld %63s %d",
                           file, &start, &end, ip, &port) == 5) {
             send_raw_tracker_command(cfg, line);
-        } else if (sscanf(line, "createtracker %255s %511s", a, b) >= 1) {
-            send_createtracker(cfg, a, b[0] ? b : "shared_file");
         } else {
             if (sscanf(line, "updatetracker %255s %ld %ld", a, &start, &end) == 3) send_updatetracker(cfg, a, start, end);
             else printf("%s: unknown command\n", cfg->id);
