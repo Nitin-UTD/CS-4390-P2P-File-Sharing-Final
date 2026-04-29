@@ -27,6 +27,7 @@ typedef struct {
     int tracker_port;
     int update_interval;
     int listen_port;
+    char advertise_ip[64];
     char local_ip[64];
 } PeerConfig;
 
@@ -117,7 +118,7 @@ static int read_client_config(PeerConfig *cfg) {
 }
 
 static int read_server_config(PeerConfig *cfg) {
-    char path[MAX_PATH_LEN], line[MAX_LINE], shared[MAX_PATH_LEN];
+    char path[MAX_PATH_LEN], line[MAX_LINE], shared[MAX_PATH_LEN], advertise_ip[64];
     FILE *fp;
     path_join(path, sizeof(path), cfg->root, "serverThreadConfig.cfg");
     fp = fopen(path, "r");
@@ -135,7 +136,19 @@ static int read_server_config(PeerConfig *cfg) {
         fclose(fp);
         return -1;
     }
+    if (read_required_line(fp, advertise_ip, sizeof(advertise_ip), "advertised peer IP") != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
+    if (strcmp(advertise_ip, "AUTO") != 0) {
+        struct in_addr tmp;
+        if (inet_pton(AF_INET, advertise_ip, &tmp) <= 0) {
+            printf("%s: invalid advertised peer IP in %s\n", cfg->id, path);
+            return -1;
+        }
+    }
+    copy_config_value(cfg->advertise_ip, sizeof(cfg->advertise_ip), advertise_ip);
     if (shared[0] == '/') snprintf(cfg->shared_dir, sizeof(cfg->shared_dir), "%s", shared);
     else path_join(cfg->shared_dir, sizeof(cfg->shared_dir), cfg->root, shared);
     return 0;
@@ -154,6 +167,7 @@ static int init_config(PeerConfig *cfg, const char *id, const char *root) {
         return -1;
     }
     get_local_ip(cfg->local_ip, sizeof(cfg->local_ip));
+    if (strcmp(cfg->advertise_ip, "AUTO") != 0) snprintf(cfg->local_ip, sizeof(cfg->local_ip), "%s", cfg->advertise_ip);
     if (strcmp(cfg->tracker_ip, "AUTO") == 0) snprintf(cfg->tracker_ip, sizeof(cfg->tracker_ip), "%s", cfg->local_ip);
     return 0;
 }

@@ -155,6 +155,60 @@ Non-interactive downloader:
 
 The regular peer configuration files and `starter.sh` both use a 900-second tracker refresh interval.
 
+### Two-Machine Run
+
+The program is designed to run across two machines. The tracker and peers listen on all network interfaces, and each peer reads the tracker IP, peer port, and advertised peer IP from that peer's configuration files.
+
+On the tracker machine, find the LAN IP:
+
+```sh
+hostname -I
+```
+
+Expected result: one or more IP addresses. Use the LAN IP reachable from the second machine, for example `192.168.1.25`.
+
+On every peer machine, set line 2 of each `clientThreadConfig.cfg` to the tracker machine IP:
+
+```text
+5000
+192.168.1.25
+900
+```
+
+On every peer machine, set line 3 of each `serverThreadConfig.cfg` to either `AUTO` or the reachable IP address of that peer machine:
+
+```text
+6003
+shared
+192.168.1.31
+```
+
+Open the required ports between machines:
+
+- tracker port `5000` on the tracker machine
+- peer ports `6001` through `6013` for the peers running on each machine
+
+Start the tracker on Machine A:
+
+```sh
+./tracker sconfig
+```
+
+Start seed peers on the machine that has files in `shared/`:
+
+```sh
+./peer Peer1 peer1 --seed
+./peer Peer2 peer2 --seed
+```
+
+Start downloader peers on either machine:
+
+```sh
+./peer Peer3 peer3 --download small.txt.track large.bin.track
+```
+
+Expected result: peers on either machine print `File small.txt download complete` and `File large.bin download complete`. If a peer cannot fetch chunks from the other machine, check line 3 of `serverThreadConfig.cfg` and the firewall/WSL networking for that peer port.
+
 ## External Sources
 
 - MD5 algorithm structure: RFC 1321 / RSA Data Security, Inc. MD5 reference implementation style. Reference: https://www.rfc-editor.org/rfc/rfc1321
