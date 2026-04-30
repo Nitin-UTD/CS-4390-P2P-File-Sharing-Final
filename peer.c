@@ -137,9 +137,10 @@ static int read_server_config(PeerConfig *cfg) {
         fclose(fp);
         return -1;
     }
-    if (read_required_line(fp, advertise_ip, sizeof(advertise_ip), "advertised peer IP") != 0) {
-        fclose(fp);
-        return -1;
+    snprintf(advertise_ip, sizeof(advertise_ip), "AUTO");
+    if (fgets(advertise_ip, sizeof(advertise_ip), fp)) {
+        trim(advertise_ip);
+        if (!*advertise_ip) snprintf(advertise_ip, sizeof(advertise_ip), "AUTO");
     }
     fclose(fp);
     if (strcmp(advertise_ip, "AUTO") != 0) {

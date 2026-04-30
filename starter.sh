@@ -81,7 +81,7 @@ for i in range(1, 14):
                     child.unlink()
         path.mkdir(parents=True, exist_ok=True)
     (root / "clientThreadConfig.cfg").write_text(f"5000\n127.0.0.1\n{peer_update_interval}\n")
-    (root / "serverThreadConfig.cfg").write_text(f"{6000+i}\nshared\nAUTO\n")
+    (root / "serverThreadConfig.cfg").write_text(f"{6000+i}\nshared\n")
 (Path("peer1") / "shared" / "small.txt").write_text("This is the small shared file for CS4390.\n")
 large = Path("peer2") / "shared" / "large.bin"
 with large.open("wb") as f:

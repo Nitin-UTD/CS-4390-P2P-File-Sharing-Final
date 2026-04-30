@@ -57,10 +57,9 @@ The peer config files use `900` seconds, which is the required 15-minute default
 ```text
 peer-listen-port
 shared-folder-name
-advertised-peer-ip-or-AUTO
 ```
 
-Use `AUTO` for single-machine or normal Linux runs. For a two-machine run, replace `AUTO` with the reachable IP address of that peer machine if auto-detection advertises the wrong address.
+The two-line form above matches the project handout. The peer obtains its own IP automatically. For a two-machine run where auto-detection advertises the wrong address, an optional third line may be added with that peer machine's reachable IP address.
 
 ## Two-Machine Run
 
@@ -82,7 +81,14 @@ On every peer machine, edit each peer's `clientThreadConfig.cfg` so line 2 is th
 900
 ```
 
-On every peer machine, edit each peer's `serverThreadConfig.cfg` so line 3 is either `AUTO` or that machine's reachable IP:
+On every peer machine, keep each peer's `serverThreadConfig.cfg` in the standard two-line form unless auto-detection advertises the wrong IP:
+
+```text
+6003
+shared
+```
+
+If needed for a two-machine/WSL setup, add an optional third line with that peer machine's reachable IP:
 
 ```text
 6003
