@@ -15,6 +15,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+/* Remove surrounding whitespace and line endings from a mutable string. */
 void trim(char *s) {
     size_t len;
     char *p;
@@ -29,6 +30,7 @@ void trim(char *s) {
     }
 }
 
+/* Bounded string copy used when the destination is a fixed struct field. */
 static void copy_value(char *dst, size_t dstsz, const char *src) {
     size_t n;
     if (dstsz == 0) return;
@@ -37,6 +39,7 @@ static void copy_value(char *dst, size_t dstsz, const char *src) {
     dst[n] = '\0';
 }
 
+/* Convert a protocol line like "<REQ LIST>" into "REQ LIST" before parsing. */
 void strip_protocol_marks(char *s) {
     size_t len;
     trim(s);
@@ -48,22 +51,26 @@ void strip_protocol_marks(char *s) {
     trim(s);
 }
 
+/* Create a directory if missing and reject the path if a non-directory exists. */
 int ensure_dir(const char *path) {
     struct stat st;
     if (stat(path, &st) == 0) return S_ISDIR(st.st_mode) ? 0 : -1;
     return mkdir(path, 0755);
 }
 
+/* Small wrapper so callers read more like intent than raw access(2). */
 int file_exists(const char *path) {
     return access(path, F_OK) == 0;
 }
 
+/* Return byte size for regular files, or -1 when stat fails. */
 long get_file_size(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0) return -1;
     return (long)st.st_size;
 }
 
+/* Join directory and file names while avoiding a duplicate slash. */
 void path_join(char *out, size_t outsz, const char *a, const char *b) {
     if (!a || !*a) {
         snprintf(out, outsz, "%s", b ? b : "");
@@ -76,6 +83,7 @@ void path_join(char *out, size_t outsz, const char *a, const char *b) {
     snprintf(out, outsz, "%s%s%s", a, a[strlen(a) - 1] == '/' ? "" : "/", b);
 }
 
+/* Return only the final path component; used to avoid directory traversal. */
 const char *base_name(const char *path) {
     const char *p;
     if (!path) return "";
@@ -83,6 +91,7 @@ const char *base_name(const char *path) {
     return p ? p + 1 : path;
 }
 
+/* send(2) can write only part of a buffer, so keep sending until complete. */
 int send_all(int sock, const void *buf, size_t len) {
     const char *p = (const char *)buf;
     while (len > 0) {
@@ -97,6 +106,7 @@ int send_all(int sock, const void *buf, size_t len) {
     return 0;
 }
 
+/* Receive exactly len bytes; used after a chunk header declares a byte count. */
 int recv_all(int sock, void *buf, size_t len) {
     char *p = (char *)buf;
     while (len > 0) {
@@ -111,6 +121,7 @@ int recv_all(int sock, void *buf, size_t len) {
     return 0;
 }
 
+/* Read one newline-terminated protocol line from a TCP stream. */
 int recv_line(int sock, char *buf, size_t maxlen) {
     size_t used = 0;
     while (used + 1 < maxlen) {
@@ -128,7 +139,11 @@ int recv_line(int sock, char *buf, size_t maxlen) {
     return (int)used;
 }
 
-/* Connects with bounded timeouts so a dead peer cannot stall a download worker. */
+/*
+ * Connect with bounded timeouts so a dead peer cannot stall a download worker.
+ * The socket is temporarily nonblocking for connect(), then restored to normal
+ * blocking mode with send/receive timeouts for the actual protocol exchange.
+ */
 int connect_tcp(const char *ip, int port) {
     int sock;
     int flags, err = 0;
@@ -177,6 +192,7 @@ int connect_tcp(const char *ip, int port) {
     return sock;
 }
 
+/* Open a reusable TCP listening socket on all local interfaces. */
 int create_listen_socket(int port) {
     int sock;
     int opt = 1;
@@ -199,6 +215,10 @@ int create_listen_socket(int port) {
     return sock;
 }
 
+/*
+ * Determine the outward-facing local IP by asking the kernel which address it
+ * would use for a UDP route. No packet is actually sent to 8.8.8.8.
+ */
 int get_local_ip(char *out, size_t outsz) {
     int sock;
     struct sockaddr_in remote;
@@ -223,6 +243,7 @@ int get_local_ip(char *out, size_t outsz) {
     return 0;
 }
 
+/* Read a whole file into a NUL-terminated buffer; useful for text .track data. */
 int read_entire_file(const char *path, unsigned char **data, size_t *len) {
     FILE *fp = fopen(path, "rb");
     long size;
@@ -253,6 +274,7 @@ int read_entire_file(const char *path, unsigned char **data, size_t *len) {
     return 0;
 }
 
+/* Write an exact byte buffer to disk, replacing any existing file. */
 int write_entire_file(const char *path, const unsigned char *data, size_t len) {
     FILE *fp = fopen(path, "wb");
     if (!fp) return -1;
@@ -264,6 +286,7 @@ int write_entire_file(const char *path, const unsigned char *data, size_t len) {
     return 0;
 }
 
+/* Minimal MD5 state structure used by the local RFC 1321-style implementation. */
 typedef struct {
     uint32_t state[4];
     uint64_t count;
@@ -281,6 +304,7 @@ typedef struct {
 #define HH(a,b,c,d,x,s,ac) { (a) += H((b),(c),(d)) + (x) + (uint32_t)(ac); (a) = ROTATE_LEFT((a),(s)); (a) += (b); }
 #define II(a,b,c,d,x,s,ac) { (a) += I((b),(c),(d)) + (x) + (uint32_t)(ac); (a) = ROTATE_LEFT((a),(s)); (a) += (b); }
 
+/* Encode native 32-bit words into little-endian bytes for the MD5 digest. */
 static void encode(unsigned char *output, const uint32_t *input, size_t len) {
     size_t i, j;
     for (i = 0, j = 0; j < len; i++, j += 4) {
@@ -291,6 +315,7 @@ static void encode(unsigned char *output, const uint32_t *input, size_t len) {
     }
 }
 
+/* Decode little-endian bytes into 32-bit words for an MD5 compression block. */
 static void decode(uint32_t *output, const unsigned char *input, size_t len) {
     size_t i, j;
     for (i = 0, j = 0; j < len; i++, j += 4) {
@@ -299,6 +324,7 @@ static void decode(uint32_t *output, const unsigned char *input, size_t len) {
     }
 }
 
+/* Process one 64-byte MD5 block through the four RFC 1321 rounds. */
 static void md5_transform(uint32_t state[4], const unsigned char block[64]) {
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3], x[16];
     decode(x, block, 64);
@@ -337,6 +363,7 @@ static void md5_transform(uint32_t state[4], const unsigned char block[64]) {
     state[0] += a; state[1] += b; state[2] += c; state[3] += d;
 }
 
+/* Initialize MD5 state to the standard constants. */
 static void md5_init(MD5_CTX_LOCAL *ctx) {
     ctx->count = 0;
     ctx->state[0] = 0x67452301;
@@ -345,6 +372,7 @@ static void md5_init(MD5_CTX_LOCAL *ctx) {
     ctx->state[3] = 0x10325476;
 }
 
+/* Add arbitrary input bytes to the MD5 stream, transforming full blocks. */
 static void md5_update(MD5_CTX_LOCAL *ctx, const unsigned char *input, size_t len) {
     size_t i, index, part_len;
     index = (size_t)((ctx->count >> 3) & 0x3f);
@@ -361,6 +389,7 @@ static void md5_update(MD5_CTX_LOCAL *ctx, const unsigned char *input, size_t le
     memcpy(&ctx->buffer[index], &input[i], len - i);
 }
 
+/* Pad the message, append bit length, and emit the final 16-byte MD5 digest. */
 static void md5_final(unsigned char digest[16], MD5_CTX_LOCAL *ctx) {
     static unsigned char padding[64] = { 0x80 };
     unsigned char bits[8];
@@ -377,6 +406,7 @@ static void md5_final(unsigned char digest[16], MD5_CTX_LOCAL *ctx) {
     memset(ctx, 0, sizeof(*ctx));
 }
 
+/* Compute an MD5 hex string for an in-memory buffer. */
 void md5_buffer(const unsigned char *data, size_t len, char out_hex[33]) {
     static const char hex[] = "0123456789abcdef";
     MD5_CTX_LOCAL ctx;
@@ -392,6 +422,7 @@ void md5_buffer(const unsigned char *data, size_t len, char out_hex[33]) {
     out_hex[32] = '\0';
 }
 
+/* Compute an MD5 hex string for a file, streaming it in chunks. */
 int md5_file(const char *path, char out_hex[33]) {
     FILE *fp = fopen(path, "rb");
     MD5_CTX_LOCAL ctx;
@@ -416,6 +447,11 @@ int md5_file(const char *path, char out_hex[33]) {
     return 0;
 }
 
+/*
+ * Parse tracker text into TrackerInfo.
+ * Header fields are parsed by name, comments are skipped, and peer rows follow
+ * the required ip:port:start:end:timestamp format.
+ */
 int parse_tracker_text(const char *text, TrackerInfo *info) {
     char *copy, *line, *saveptr = NULL;
     char value[MAX_LINE];

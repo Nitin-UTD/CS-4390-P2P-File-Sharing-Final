@@ -18,6 +18,7 @@
 #define MAX_DOWNLOAD_THREADS 8
 #define SEGMENT_SIZE 65536
 
+/* All per-peer runtime values are collected here after reading config files. */
 typedef struct {
     char id[64];
     char root[MAX_PATH_LEN];
@@ -32,6 +33,7 @@ typedef struct {
     char local_ip[64];
 } PeerConfig;
 
+/* One worker thread downloads one mutually exclusive file segment. */
 typedef struct {
     PeerConfig *cfg;
     TrackerInfo *tracker;
@@ -41,10 +43,16 @@ typedef struct {
     int ok;
 } DownloadTask;
 
+/* Global config is needed by the peer upload server worker callbacks. */
 static PeerConfig g_cfg;
+
+/* Signal handlers flip this flag so long-running peer loops can exit cleanly. */
 static volatile sig_atomic_t g_running = 1;
+
+/* Multiple download threads write different offsets of the same file. */
 static pthread_mutex_t g_file_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Copy config strings safely into fixed-size struct fields. */
 static void copy_config_value(char *dst, size_t dstsz, const char *src) {
     size_t n;
     if (dstsz == 0) return;
@@ -53,11 +61,13 @@ static void copy_config_value(char *dst, size_t dstsz, const char *src) {
     dst[n] = '\0';
 }
 
+/* SIGINT/SIGTERM handler used by starter.sh to stop peers cleanly. */
 static void stop_running(int sig) {
     (void)sig;
     g_running = 0;
 }
 
+/* Parse bounded numeric config fields and reject malformed trailing text. */
 static int parse_config_int(const char *text, int min, int max, int *out) {
     char *end = NULL;
     long value = strtol(text, &end, 10);
@@ -66,6 +76,7 @@ static int parse_config_int(const char *text, int min, int max, int *out) {
     return 0;
 }
 
+/* Read one required non-empty line from a peer config file. */
 static int read_required_line(FILE *fp, char *line, size_t line_sz, const char *field_name) {
     if (!fgets(line, line_sz, fp)) {
         printf("peer config: missing %s\n", field_name);
@@ -89,12 +100,14 @@ static int read_client_config(PeerConfig *cfg) {
         printf("%s: cannot open required config %s\n", cfg->id, path);
         return -1;
     }
+    /* clientThreadConfig.cfg line 1: tracker port. */
     if (read_required_line(fp, line, sizeof(line), "tracker port") != 0 ||
         parse_config_int(line, 1, 65535, &cfg->tracker_port) != 0) {
         printf("%s: invalid tracker port in %s\n", cfg->id, path);
         fclose(fp);
         return -1;
     }
+    /* clientThreadConfig.cfg line 2: tracker IP, with AUTO accepted for local tests. */
     if (read_required_line(fp, line, sizeof(line), "tracker IP") != 0) {
         fclose(fp);
         return -1;
@@ -108,6 +121,7 @@ static int read_client_config(PeerConfig *cfg) {
         }
     }
     copy_config_value(cfg->tracker_ip, sizeof(cfg->tracker_ip), line);
+    /* clientThreadConfig.cfg line 3: periodic update interval in seconds. */
     if (read_required_line(fp, line, sizeof(line), "update interval") != 0 ||
         parse_config_int(line, 1, 86400, &cfg->update_interval) != 0) {
         printf("%s: invalid update interval in %s\n", cfg->id, path);
@@ -118,6 +132,7 @@ static int read_client_config(PeerConfig *cfg) {
     return 0;
 }
 
+/* Read peer upload-server settings from serverThreadConfig.cfg. */
 static int read_server_config(PeerConfig *cfg) {
     char path[MAX_PATH_LEN], line[MAX_LINE], shared[MAX_PATH_LEN], advertise_ip[64];
     FILE *fp;
@@ -127,16 +142,23 @@ static int read_server_config(PeerConfig *cfg) {
         printf("%s: cannot open required config %s\n", cfg->id, path);
         return -1;
     }
+    /* Required line 1: TCP port where this peer serves file chunks. */
     if (read_required_line(fp, line, sizeof(line), "peer listen port") != 0 ||
         parse_config_int(line, 1, 65535, &cfg->listen_port) != 0) {
         printf("%s: invalid listen port in %s\n", cfg->id, path);
         fclose(fp);
         return -1;
     }
+    /* Required line 2: peer shared folder, relative to the peer root if needed. */
     if (read_required_line(fp, shared, sizeof(shared), "shared directory") != 0) {
         fclose(fp);
         return -1;
     }
+    /*
+     * Optional line 3: advertised IP. The prompt's default format is two lines,
+     * but this optional override helps two-machine/WSL runs where auto-detected
+     * addresses are not reachable from the other machine.
+     */
     snprintf(advertise_ip, sizeof(advertise_ip), "AUTO");
     if (fgets(advertise_ip, sizeof(advertise_ip), fp)) {
         trim(advertise_ip);
@@ -156,13 +178,17 @@ static int read_server_config(PeerConfig *cfg) {
     return 0;
 }
 
+/* Initialize directories, peer identity, tracker address, and advertised IP. */
 static int init_config(PeerConfig *cfg, const char *id, const char *root) {
     memset(cfg, 0, sizeof(*cfg));
     snprintf(cfg->id, sizeof(cfg->id), "%s", id ? id : "Peer");
     snprintf(cfg->root, sizeof(cfg->root), "%s", root ? root : ".");
     path_join(cfg->cache_dir, sizeof(cfg->cache_dir), cfg->root, "cache");
     path_join(cfg->downloads_dir, sizeof(cfg->downloads_dir), cfg->root, "downloads");
+    /* All runtime values come from this peer's config files. */
     if (read_client_config(cfg) != 0 || read_server_config(cfg) != 0) return -1;
+
+    /* Ensure the folders used by downloading, caching, and logging exist. */
     if (ensure_dir(cfg->root) != 0 || ensure_dir(cfg->shared_dir) != 0 ||
         ensure_dir(cfg->cache_dir) != 0 || ensure_dir(cfg->downloads_dir) != 0) {
         printf("%s: could not create required peer directories\n", cfg->id);
@@ -174,6 +200,7 @@ static int init_config(PeerConfig *cfg, const char *id, const char *root) {
     return 0;
 }
 
+/* Send one request to the tracker and collect the full TCP reply. */
 static int tracker_request(const PeerConfig *cfg, const char *msg, char **reply_out, size_t *reply_len) {
     int sock = connect_tcp(cfg->tracker_ip, cfg->tracker_port);
     char buf[4096];
@@ -190,6 +217,7 @@ static int tracker_request(const PeerConfig *cfg, const char *msg, char **reply_
         close(sock);
         return -1;
     }
+    /* Tracker replies can be larger than one recv(), especially GET responses. */
     while ((n = recv(sock, buf, sizeof(buf), 0)) > 0) {
         if (len + (size_t)n + 1 > cap) {
             char *tmp;
@@ -217,6 +245,7 @@ static int tracker_request(const PeerConfig *cfg, const char *msg, char **reply_
     return 0;
 }
 
+/* Create a tracker entry for a complete file in this peer's shared directory. */
 static int send_createtracker(const PeerConfig *cfg, const char *file_name, const char *description) {
     char path[MAX_PATH_LEN], md5[33], msg[MAX_LINE], *reply = NULL;
     long size;
@@ -226,6 +255,7 @@ static int send_createtracker(const PeerConfig *cfg, const char *file_name, cons
         printf("%s: cannot create tracker for %s\n", cfg->id, file_name);
         return -1;
     }
+    /* The message follows the exact tracker protocol required by the prompt. */
     snprintf(msg, sizeof(msg), "<createtracker %s %ld %s %s %s %d>\n",
              file_name, size, description && *description ? description : "shared_file", md5, cfg->local_ip, cfg->listen_port);
     printf("%s: %s", cfg->id, msg);
@@ -238,6 +268,7 @@ static int send_createtracker(const PeerConfig *cfg, const char *file_name, cons
     return -1;
 }
 
+/* Tell the tracker this peer has a complete byte range of a file. */
 static int send_updatetracker(const PeerConfig *cfg, const char *file_name, long start, long end) {
     char msg[MAX_LINE], *reply = NULL;
     snprintf(msg, sizeof(msg), "<updatetracker %s %ld %ld %s %d>\n",
@@ -251,6 +282,7 @@ static int send_updatetracker(const PeerConfig *cfg, const char *file_name, long
     return -1;
 }
 
+/* Manual-testing path: forward a raw command after adding protocol brackets. */
 static int send_raw_tracker_command(const PeerConfig *cfg, const char *line) {
     char msg[MAX_LINE], *reply = NULL;
     snprintf(msg, sizeof(msg), "<%s>\n", line);
@@ -264,6 +296,7 @@ static int send_raw_tracker_command(const PeerConfig *cfg, const char *line) {
     return -1;
 }
 
+/* Request and print the tracker's list of available tracker files. */
 static int request_list(const PeerConfig *cfg) {
     char *reply = NULL;
     printf("%s: REQ LIST\n", cfg->id);
@@ -276,6 +309,7 @@ static int request_list(const PeerConfig *cfg) {
     return 0;
 }
 
+/* Pull tracker text and its checksum out of a REP GET response. */
 static int extract_tracker_body(const char *reply, char **body_out, char md5[33]) {
     const char *begin = strstr(reply, "<REP GET BEGIN>");
     const char *body;
@@ -306,11 +340,13 @@ static int get_tracker_file(const PeerConfig *cfg, const char *track_name, Track
         printf("%s: GET failed\n", cfg->id);
         return -1;
     }
+    /* Reject malformed GET responses before saving anything to cache. */
     if (extract_tracker_body(reply, &body, md5_expected) != 0) {
         printf("%s: invalid tracker GET response\n%s", cfg->id, reply);
         free(reply);
         return -1;
     }
+    /* The project requires validating tracker data using the MD5 in REP GET END. */
     md5_buffer((unsigned char *)body, strlen(body), md5_actual);
     if (strcmp(md5_expected, md5_actual) != 0) {
         printf("%s: tracker MD5 mismatch expected %s got %s\n", cfg->id, md5_expected, md5_actual);
@@ -318,6 +354,7 @@ static int get_tracker_file(const PeerConfig *cfg, const char *track_name, Track
         free(body);
         return -1;
     }
+    /* Cache valid tracker files so resumed peers know what was incomplete. */
     path_join(cache_path, sizeof(cache_path), cfg->cache_dir, track_name);
     if (write_entire_file(cache_path, (unsigned char *)body, strlen(body)) != 0) {
         printf("%s: cannot cache tracker file %s\n", cfg->id, track_name);
@@ -336,12 +373,14 @@ static int get_tracker_file(const PeerConfig *cfg, const char *track_name, Track
     return 0;
 }
 
+/* Select the newest peer that covers the requested byte range, skipping one optional bad source. */
 static int choose_source_skip(const TrackerInfo *tracker, long start, long end,
                               const char *skip_ip, int skip_port, PeerEntry *out) {
     int i, found = 0;
     long best_ts = -1;
     for (i = 0; i < tracker->peer_count; i++) {
         const PeerEntry *p = &tracker->peers[i];
+        /* A peer can advertise only a chunk; it must fully cover this request. */
         if (skip_ip && strcmp(p->ip, skip_ip) == 0 && p->port == skip_port) continue;
         if (p->start <= start && p->end >= end && p->timestamp > best_ts) {
             *out = *p;
@@ -352,16 +391,19 @@ static int choose_source_skip(const TrackerInfo *tracker, long start, long end,
     return found ? 0 : -1;
 }
 
+/* Normal source selection is the same policy without skipping a failed peer. */
 static int choose_source(const TrackerInfo *tracker, long start, long end, PeerEntry *out) {
     return choose_source_skip(tracker, start, end, NULL, 0, out);
 }
 
+/* Build the path to the local segment-completion cache for a file. */
 static void part_file_path(const PeerConfig *cfg, const char *filename, char *out, size_t outsz) {
     char name[320];
     snprintf(name, sizeof(name), "%s.parts", filename);
     path_join(out, outsz, cfg->cache_dir, name);
 }
 
+/* Check whether a segment has already completed in a previous run. */
 static int is_part_done(const PeerConfig *cfg, const char *filename, long start, long end) {
     char path[MAX_PATH_LEN];
     FILE *fp;
@@ -379,6 +421,7 @@ static int is_part_done(const PeerConfig *cfg, const char *filename, long start,
     return 0;
 }
 
+/* Record a completed segment so a later restart does not redownload it. */
 static void mark_part_done(const PeerConfig *cfg, const char *filename, long start, long end) {
     char path[MAX_PATH_LEN];
     FILE *fp;
@@ -393,6 +436,7 @@ static void mark_part_done(const PeerConfig *cfg, const char *filename, long sta
     fclose(fp);
 }
 
+/* Request one <=1024-byte chunk from another peer's upload server. */
 static int request_chunk(const PeerConfig *cfg, const PeerEntry *src, const char *filename, long start, long end, unsigned char **data, size_t *len) {
     int sock = connect_tcp(src->ip, src->port);
     char req[MAX_LINE], header[MAX_LINE];
@@ -408,6 +452,7 @@ static int request_chunk(const PeerConfig *cfg, const PeerEntry *src, const char
         close(sock);
         return -1;
     }
+    /* The response must match the exact requested size and the 1024-byte cap. */
     if (sscanf(header, "REP CHUNK %ld", &size) != 1 || size != end - start || size > CHUNK_SIZE) {
         close(sock);
         return -1;
@@ -443,6 +488,10 @@ static void *download_worker(void *arg) {
         FILE *fp;
         int attempt, got_chunk = 0;
         if (chunk_end > task->end) chunk_end = task->end;
+        /*
+         * Retry with fresh tracker data because listed peers may be dead or may
+         * not yet have uploaded the segment they are expected to serve.
+         */
         for (attempt = 0; attempt < 120; attempt++) {
             PeerEntry failed_source = source;
             TrackerInfo fresh;
@@ -453,6 +502,7 @@ static void *download_worker(void *arg) {
             }
             snprintf(track_name, sizeof(track_name), "%s.track", task->tracker->filename);
             usleep(100000);
+            /* Prefer a different source after a failed source attempt. */
             if (get_tracker_file(task->cfg, track_name, &fresh) == 0 &&
                 choose_source_skip(&fresh, pos, chunk_end, failed_source.ip, failed_source.port, &source) == 0) {
                 continue;
@@ -464,6 +514,7 @@ static void *download_worker(void *arg) {
         if (!got_chunk) {
             return NULL;
         }
+        /* Write the chunk directly into its final offset in the shared file. */
         path_join(path, sizeof(path), task->cfg->shared_dir, task->tracker->filename);
         pthread_mutex_lock(&g_file_lock);
         fp = fopen(path, "r+b");
@@ -480,12 +531,14 @@ static void *download_worker(void *arg) {
     }
     task->ok = 1;
     if (task->ok) {
+        /* Only completed segments are advertised to the tracker. */
         mark_part_done(task->cfg, task->tracker->filename, task->start, task->end);
         send_updatetracker(task->cfg, task->tracker->filename, task->start, task->end);
     }
     return NULL;
 }
 
+/* Download a full file by splitting it into parallel, mutually exclusive segments. */
 static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
     long size = tracker->filesize;
     long total_segments, next_segment = 0;
@@ -495,6 +548,7 @@ static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
     char final_path[MAX_PATH_LEN], md5[33], cache_track[MAX_PATH_LEN], track_name[300];
     FILE *fp;
     if (size <= 0) return -1;
+    /* Larger segments reduce tracker update noise; each segment still uses 1024-byte chunks. */
     total_segments = (size + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
     path_join(final_path, sizeof(final_path), cfg->shared_dir, tracker->filename);
     fp = fopen(final_path, "ab");
@@ -503,16 +557,20 @@ static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
     while (next_segment < total_segments) {
         int tasks_count = 0;
         memset(tasks, 0, sizeof(tasks));
+
+        /* Launch up to MAX_DOWNLOAD_THREADS independent segment downloads. */
         while (tasks_count < MAX_DOWNLOAD_THREADS && next_segment < total_segments) {
             long segment = next_segment;
             long pos = segment * SEGMENT_SIZE;
             long end = pos + SEGMENT_SIZE;
             if (end > size) end = size;
             next_segment++;
+            /* Resume support: completed cached segments are not downloaded again. */
             if (is_part_done(cfg, tracker->filename, pos, end)) {
                 send_updatetracker(cfg, tracker->filename, pos, end);
                 continue;
             }
+            /* If the cached tracker is stale, fetch a fresh copy before failing. */
             if (choose_source(tracker, pos, end, &tasks[tasks_count].source) != 0) {
                 if (get_tracker_file(cfg, track_name, tracker) != 0 ||
                     choose_source(tracker, pos, end, &tasks[tasks_count].source) != 0) {
@@ -531,6 +589,7 @@ static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
             tasks_count++;
         }
         if (tasks_count == 0) continue;
+        /* Join every segment thread before validating this batch. */
         for (i = 0; i < tasks_count; i++) pthread_join(threads[i], NULL);
         for (i = 0; i < tasks_count; i++) {
             if (!tasks[i].ok) {
@@ -540,6 +599,7 @@ static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
             }
         }
     }
+    /* The final file is trusted only after size and MD5 match the tracker. */
     if (get_file_size(final_path) == size && md5_file(final_path, md5) == 0 && strcmp(md5, tracker->md5) == 0) {
         printf("%s: File %s download complete\n", cfg->id, tracker->filename);
         path_join(cache_track, sizeof(cache_track), cfg->cache_dir, track_name);
@@ -552,18 +612,21 @@ static int download_from_tracker(const PeerConfig *cfg, TrackerInfo *tracker) {
     return -1;
 }
 
+/* Fetch one tracker file and immediately start the automatic download process. */
 static int get_and_download(const PeerConfig *cfg, const char *track_name) {
     TrackerInfo tracker;
     if (get_tracker_file(cfg, track_name, &tracker) != 0) return -1;
     return download_from_tracker(cfg, &tracker);
 }
 
+/* Serve a single GETCHUNK request from another peer. */
 static void serve_chunk_request(int sock, char *request) {
     char cmd[64], filename[256], path[MAX_PATH_LEN], header[MAX_LINE];
     long start, end, size;
     FILE *fp;
     unsigned char buf[CHUNK_SIZE];
     strip_protocol_marks(request);
+    /* Enforce the 1024-byte upper limit required by the project prompt. */
     if (sscanf(request, "%63s %255s %ld %ld", cmd, filename, &start, &end) != 4 ||
         strcmp(cmd, "GETCHUNK") != 0 || start < 0 || end <= start || end - start > CHUNK_SIZE) {
         send_all(sock, "<GET invalid>\n", 14);
@@ -587,6 +650,7 @@ static void serve_chunk_request(int sock, char *request) {
     if (size > 0) send_all(sock, buf, (size_t)size);
 }
 
+/* Worker thread for one incoming peer-to-peer chunk request. */
 static void *peer_upload_worker(void *arg) {
     int sock = *(int *)arg;
     char request[MAX_LINE];
@@ -596,6 +660,7 @@ static void *peer_upload_worker(void *arg) {
     return NULL;
 }
 
+/* Peer upload server: accept TCP connections and detach a worker for each. */
 static void *peer_server(void *arg) {
     PeerConfig *cfg = (PeerConfig *)arg;
     int listen_sock = create_listen_socket(cfg->listen_port);
@@ -624,6 +689,7 @@ static void *peer_server(void *arg) {
     return NULL;
 }
 
+/* Seed mode: create tracker entries for every regular file already shared. */
 static void seed_all_shared_files(const PeerConfig *cfg) {
     DIR *dir = opendir(cfg->shared_dir);
     struct dirent *ent;
@@ -659,6 +725,7 @@ static void periodic_update_shared(const PeerConfig *cfg) {
         part_file_path(cfg, ent->d_name, parts_path, sizeof(parts_path));
         parts = fopen(parts_path, "r");
         if (parts) {
+            /* Partial downloads advertise only segments proven complete. */
             long start, end;
             while (fscanf(parts, "%ld %ld", &start, &end) == 2) {
                 if (start >= 0 && end > start && end <= size) {
@@ -668,11 +735,13 @@ static void periodic_update_shared(const PeerConfig *cfg) {
             }
             fclose(parts);
         }
+        /* If there is no parts file, treat the local file as a complete seed. */
         if (!sent_parts) send_updatetracker(cfg, ent->d_name, 0, size);
     }
     closedir(dir);
 }
 
+/* Print supported command-line modes for manual or scripted runs. */
 static void print_usage(void) {
     printf("Usage:\n");
     printf("  ./peer Peer1 peer1\n");
@@ -680,11 +749,13 @@ static void print_usage(void) {
     printf("  ./peer Peer3 peer3 --download file1.track file2.track [--stay]\n");
 }
 
+/* Helper for parsing manual commands with optional descriptions. */
 static const char *skip_ws(const char *s) {
     while (*s && isspace((unsigned char)*s)) s++;
     return s;
 }
 
+/* Used to distinguish full raw createtracker protocol from short manual form. */
 static int is_integer_token(const char *s) {
     char *end = NULL;
     if (!s || !*s) return 0;
@@ -692,6 +763,7 @@ static int is_integer_token(const char *s) {
     return s != end && *end == '\0';
 }
 
+/* Manual mode required by the prompt for LIST/GET/create/update testing. */
 static void interactive_loop(PeerConfig *cfg) {
     char line[MAX_LINE];
     printf("%s: enter commands: LIST, GET file.track, createtracker file desc, updatetracker file start end, quit\n", cfg->id);
@@ -720,6 +792,7 @@ static void interactive_loop(PeerConfig *cfg) {
                 send_createtracker(cfg, file, "shared_file");
             } else {
                 char next[64] = "";
+                /* Numeric second token means the user typed the full protocol form. */
                 if (sscanf(p, "%63s", next) == 1 && is_integer_token(next)) {
                     send_raw_tracker_command(cfg, line);
                 } else {
@@ -742,11 +815,13 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     signal(SIGINT, stop_running);
     signal(SIGTERM, stop_running);
+    /* Every run needs a human-readable peer id and that peer's root folder. */
     if (argc < 3) {
         print_usage();
         return 1;
     }
     if (init_config(&g_cfg, argv[1], argv[2]) != 0) return 1;
+    /* Start the upload server first so this peer can serve chunks while working. */
     if (pthread_create(&server_tid, NULL, peer_server, &g_cfg) != 0) {
         perror("peer server thread");
         return 1;
@@ -754,6 +829,7 @@ int main(int argc, char **argv) {
     pthread_detach(server_tid);
     sleep(1);
     if (argc >= 4 && strcmp(argv[3], "--seed") == 0) {
+        /* Seeder mode creates tracker files and then periodically refreshes them. */
         seed_all_shared_files(&g_cfg);
         while (g_running) {
             sleep(g_cfg.update_interval);
@@ -761,6 +837,7 @@ int main(int argc, char **argv) {
             periodic_update_shared(&g_cfg);
         }
     } else if (argc >= 5 && strcmp(argv[3], "--download") == 0) {
+        /* Download mode first shows LIST, then GETs each requested tracker file. */
         int download_failed = 0, stay_online = 0, track_count = 0;
         request_list(&g_cfg);
         for (i = 4; i < argc; i++) {
@@ -781,6 +858,7 @@ int main(int argc, char **argv) {
             download_failed = 1;
         }
         if (stay_online) {
+            /* Wave-1 peers stay alive in starter.sh to serve chunks to wave 2. */
             if (download_failed) {
                 printf("%s: staying online to serve available files\n", g_cfg.id);
             } else {
